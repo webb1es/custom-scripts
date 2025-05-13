@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Configuration for 50M records with Cosmos DB RU constraints
+# Configuration for millions of records with Cosmos DB RU constraints
 CSV_FILE="/Users/webster.muchefa/Downloads/INCENTIVE/SAMPLE_MSISDN.csv"
 CONNECTION_STRING="mongodb://localhost:27017"
 DATABASE="dxlrewardsdb"
@@ -15,13 +15,15 @@ MEMORY_RESET=200       # Reset memory tracking every X batches
 
 echo "Starting import process for large dataset (optimized for 50M records)..."
 
-# Step 1: Import CSV with optimized parameters
-echo "Step 1: Importing CSV data into temporary collection..."
+# Step 1: Modify import parameters to ensure strings remain strings
+echo "Step 1: Importing CSV data into temporary collection with string type preservation..."
+# Add --columnsHaveTypes and --type=csv to specify string type for MSISDN
 mongoimport --uri "$CONNECTION_STRING" \
   --db "$DATABASE" \
   --collection "$TEMP_COLLECTION" \
   --type csv \
-  --fields "MSISDN" \
+  --columnsHaveTypes \
+  --fields "MSISDN.string()" \
   --file "$CSV_FILE" \
   --numInsertionWorkers $MAX_INSERTION_WORKERS \
   --batchSize $BATCH_SIZE \
@@ -58,28 +60,40 @@ try {
     var cursor = db.$TEMP_COLLECTION.find().noCursorTimeout().batchSize($PROCESS_BATCH_SIZE);
     var batch = [];
 
+    // Add a reminder about import options
+    print("[INFO] Using direct string import with --columnsHaveTypes and MSISDN.string() type specification");
+
     while(cursor.hasNext()) {
         var doc = cursor.next();
-        var msisdn = doc.MSISDN ? doc.MSISDN.toString() : null;
-        
+        var msisdn = doc.MSISDN ? doc.MSISDN.toString().trim() : null;
+
+        // Log information about the MSISDN type in the first few records
+        if (stats.batchCount === 0 && stats.processed < 10) {
+            print("[DEBUG] MSISDN #" + stats.processed + " Value: " + msisdn + " Type: " + typeof doc.MSISDN);
+        }
+
         // Skip invalid/duplicate records
-        if (!msisdn) { stats.skipped++; continue; }
+        if (!msisdn || msisdn === "") { stats.skipped++; continue; }
         if (msisdnSet[msisdn]) { stats.duplicates++; continue; }
-        
+
         // Mark as processed and add to batch
         msisdnSet[msisdn] = 1;
+
+        // Create the document to insert - match Go struct mapping
+        var newDoc = {
+            _id: msisdn,  // Store MSISDN directly as _id to match Go struct
+            simType: "N/A",
+            simNumber: "N/A",
+            status: "completed",
+            requestId: "batch-import-old-app",
+            allocationDate: now,
+            createdDate: now
+        };
+
+        // Add to batch
         batch.push({
-            updateOne: {
-                filter: { _id: msisdn },
-                update: { \$set: {
-                    simType: "N/A",
-                    simNumber: "N/A",
-                    status: "completed",
-                    requestId: "batch-import-old-app",
-                    allocationDate: now,
-                    createdDate: now
-                }},
-                upsert: true
+            insertOne: {
+                document: newDoc
             }
         });
 
@@ -89,28 +103,28 @@ try {
                 db.$TARGET_COLLECTION.bulkWrite(batch, { ordered: false });
                 stats.processed += batch.length;
                 stats.batchCount++;
-                
+
                 // Status reporting
                 if (stats.batchCount % 50 === 0) {
                     var elapsedSecs = (new Date() - stats.startTime)/1000;
                     var recordsPerSec = Math.round(stats.processed/elapsedSecs);
-                    print("[INFO] Processed: " + stats.processed.toLocaleString() + 
-                          " | Skipped: " + (stats.duplicates + stats.skipped).toLocaleString() + 
+                    print("[INFO] Processed: " + stats.processed.toLocaleString() +
+                          " | Skipped: " + (stats.duplicates + stats.skipped).toLocaleString() +
                           " | Speed: " + recordsPerSec.toLocaleString() + " rec/sec");
                 }
-                
+
                 // Memory management for large datasets
                 if (stats.batchCount % $MEMORY_RESET === 0) {
                     msisdnSet = {};
                     try { gc(); } catch(e) {}
                 }
-                
+
                 // RU management pauses
                 if (stats.batchCount % $PAUSE_INTERVAL === 0) {
                     print("[INFO] Pausing for RU management...");
                     sleep($PAUSE_DURATION);
                 }
-                
+
                 batch = [];
             } catch (e) {
                 print("[ERROR] Batch processing failed: " + e);
@@ -135,7 +149,7 @@ try {
     var netNewRecords = finalCount - initialCount;
     var totalTimeSecs = (new Date() - stats.startTime)/1000;
     var throughput = Math.round(stats.processed/totalTimeSecs);
-    
+
     print("\n[SUCCESS] Import completed - Final statistics");
     print("┌───────────────────────────────────────────────┐");
     print("│ Total records processed:  " + stats.processed.toLocaleString().padStart(12) + "        │");
@@ -151,12 +165,12 @@ try {
     print("[ERROR] Import process failed: " + e);
 } finally {
     if (cursor) cursor.close();
-    
+
     if (stats.processed > 0) {
         print("[INFO] Cleaning up temporary collection...");
         db.$TEMP_COLLECTION.drop();
     }
-    
+
     msisdnSet = null;
 }
 EOF
