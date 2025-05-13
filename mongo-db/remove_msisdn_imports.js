@@ -1,30 +1,15 @@
+#!/usr/bin/env mongosh
 // Hardcoded settings - edit these values directly if needed
 // 
 // To run on Windows:
 // 1. Open PowerShell and navigate to MongoDB bin directory (e.g., C:\Program Files\MongoDB\Server\6.0\bin)
-// 2. Run: .\mongosh.exe --file "path\to\remove_msisdn_imports.js"
+// 2. Run: .\mongosh.exe "$CONN_STRING" --file "path\to\remove_msisdn_imports.js"
 // 
 // To run on Linux:
 // 1. Open terminal
-// 2. Run: mongosh --file "/path/to/remove_msisdn_imports.js"
-// 
-// If mongosh is not in your PATH, you may need to run:
-// /path/to/mongodb/bin/mongosh --file "/path/to/remove_msisdn_imports.js"
-// 
-// For remote MongoDB connections:
-// - Make sure you have network access to the MongoDB server (check firewall settings)
-// - Verify the MongoDB server is configured to accept remote connections
-// - Ensure authentication credentials are correct if required
-//
-// If you encounter permission issues, run PowerShell as administrator
-//
+// 2. Run: mongosh "$CONN_STRING" --file "/path/to/remove_msisdn_imports.js"
 
-// IMPORTANT: Set your actual MongoDB connection string here
-const connectionString = "mongodb://localhost:27017/";  // Replace with your actual remote connection string
-// Examples:
-// - With authentication: "mongodb://username:password@server:port/"
-// - With replica set: "mongodb://server1:port,server2:port,server3:port/?replicaSet=myReplicaSet"
-// - With SSL: "mongodb://server:port/?ssl=true"
+const connectionString = "$CONN_STRING" // mongodb://localhost:27017/
 
 const batchSize = 1000;     // Number of records per batch
 const pauseMs = 1000;       // Pause between batches (milliseconds)
@@ -40,34 +25,17 @@ function makeProgressBar(percent, width = 20) {
     return '[' + '='.repeat(completed) + ' '.repeat(remaining) + ']';
 }
 
-print(`Starting batch deletion with connection: ${connectionString}`);
-print(`Database: ${dbName}, Collection: ${collectionName}`);
+print(`Starting batch deletion with connection to ${dbName}.${collectionName}`);
 print(`Will delete records where ${filterField} exists`);
 print(`Processing ${batchSize} records per batch with ${pauseMs}ms pause`);
 
 try {
-    // Connect to MongoDB using connection string
-    print(`Attempting to connect to MongoDB at: ${connectionString}`);
-    let conn;
-    try {
-        conn = new Mongo(connectionString);
-        print("Connection established successfully");
-    } catch (connError) {
-        print(`Connection error: ${connError.message}`);
-        print("Please check:");
-        print("- Your network connection");
-        print("- If the MongoDB server is running and accessible");
-        print("- If the connection string is correct");
-        print("- If authentication credentials are correct (if required)");
-        print("- If firewalls or security groups allow the connection");
-        throw connError;
-    }
-    
+    // Connect to MongoDB
+    let conn = new Mongo(connectionString);
     const db = conn.getDB(dbName);
-    print(`Successfully connected to database: ${dbName}`);
     
     // Count total documents to track progress percentage
-    const totalToDelete = db[collectionName].count({ [filterField]: { $exists: true } });
+    const totalToDelete = db[collectionName].countDocuments({ [filterField]: { $exists: true } });
     print(`Found ${totalToDelete} documents to delete`);
     
     if (totalToDelete === 0) {
@@ -88,18 +56,18 @@ try {
     
     // Process in batches until no matching documents remain
     while (true) {
-        // Find records to delete (only get IDs to save memory)
-        const idsToDelete = db[collectionName]
-            .find({ [filterField]: { $exists: true } }, { _id: 1 })
-            .limit(batchSize)
-            .map(doc => doc._id);
+        // Find and delete documents directly using deleteMany with a limit
+        const result = db[collectionName].deleteMany(
+            { [filterField]: { $exists: true } },
+            { limit: batchSize }
+        );
+        
+        const deletedCount = result.deletedCount;
         
         // Exit if no more matching documents
-        if (idsToDelete.length === 0) break;
+        if (deletedCount === 0) break;
         
-        // Delete the batch
-        const result = db[collectionName].deleteMany({ _id: { $in: idsToDelete } });
-        totalDeleted += result.deletedCount;
+        totalDeleted += deletedCount;
         batchCount++;
         
         // Calculate progress percentage
@@ -109,12 +77,11 @@ try {
         const currentTime = new Date();
         const batchDuration = (currentTime - lastBatchTime) / 1000;
         totalBatchDuration += batchDuration;
-        const avgBatchDuration = totalBatchDuration / batchCount;
-        const recordsPerSecond = Math.round(result.deletedCount / batchDuration);
+        const recordsPerSecond = Math.round(deletedCount / batchDuration);
         
         // Estimate remaining time
         const remainingRecords = totalToDelete - totalDeleted;
-        const estimatedSecondsLeft = Math.round(remainingRecords / recordsPerSecond);
+        const estimatedSecondsLeft = remainingRecords > 0 ? Math.round(remainingRecords / recordsPerSecond) : 0;
         let timeRemaining;
         
         if (estimatedSecondsLeft > 3600) {
@@ -130,7 +97,7 @@ try {
         }
         
         // Only log periodically to reduce output lines
-        if (batchCount % logInterval === 0 || batchCount === 1 || idsToDelete.length < batchSize) {
+        if (batchCount % logInterval === 0 || batchCount === 1 || deletedCount < batchSize) {
             print(`${batchCount.toString().padStart(5)} | ${percentComplete.toString().padStart(3)}%     | ${totalDeleted.toString().padStart(10)}/${totalToDelete} | ${recordsPerSecond}/s | ${timeRemaining}`);
         }
         
@@ -151,4 +118,5 @@ try {
     print(`Total batches: ${batchCount}`);
 } catch (error) {
     print(`Error: ${error.message}`);
+    print(`Stack trace: ${error.stack || "No stack trace available"}`);
 }

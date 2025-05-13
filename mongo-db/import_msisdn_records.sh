@@ -1,17 +1,27 @@
 #!/bin/bash
 
 # Configuration - Optimized for Cosmos DB with RU constraints (50M records)
-CSV_FILE="/Users/webster.muchefa/Downloads/INCENTIVE/SAMPLE_MSISDN.csv"
-CONNECTION_STRING="mongodb://localhost:27017"
+CSV_FILE="/path/to/your/SAMPLE_MSISDN.csv" # Update this path for your Linux VPS
+const connectionString = "$CONN_STRING" // mongodb://localhost:27017/
 DATABASE="dxlrewardsdb"
 TEMP_COLLECTION="msisdn_records_temp"
 TARGET_COLLECTION="msisdn_records"
 BATCH_SIZE=200000      # Import batch size - higher values improve throughput
 PROCESS_BATCH_SIZE=5000   # Processing batch size - lower values better respect RU limits
-MAX_WORKERS=12         # Parallel workers - adjust based on CPU cores
+MAX_WORKERS=8         # Adjusted for typical VPS CPU cores
 PAUSE_INTERVAL=10      # Batches between RU pauses
 PAUSE_DURATION=5       # Pause duration in seconds - increase for stricter RU limits
 MEMORY_RESET=200       # Memory cleanup interval - lower for limited RAM
+
+# Check if MongoDB tools are installed
+command -v mongoimport >/dev/null 2>&1 || { echo "MongoDB tools not found. Install using: apt-get install -y mongodb-database-tools"; exit 1; }
+command -v mongo >/dev/null 2>&1 || { echo "MongoDB shell not found. Install using: apt-get install -y mongodb-org-shell"; exit 1; }
+
+# Check if CSV file exists
+if [ ! -f "$CSV_FILE" ]; then
+    echo "Error: CSV file not found at $CSV_FILE"
+    exit 1
+fi
 
 echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting MSISDN import (50M records to Cosmos DB)"
 
