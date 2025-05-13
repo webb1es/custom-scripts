@@ -1,5 +1,31 @@
 // Hardcoded settings - edit these values directly if needed
-const connectionString = "mongodb://localhost:27017/";  // MongoDB connection string
+// 
+// To run on Windows:
+// 1. Open PowerShell and navigate to MongoDB bin directory (e.g., C:\Program Files\MongoDB\Server\6.0\bin)
+// 2. Run: .\mongosh.exe --file "path\to\remove_msisdn_imports.js"
+// 
+// To run on Linux:
+// 1. Open terminal
+// 2. Run: mongosh --file "/path/to/remove_msisdn_imports.js"
+// 
+// If mongosh is not in your PATH, you may need to run:
+// /path/to/mongodb/bin/mongosh --file "/path/to/remove_msisdn_imports.js"
+// 
+// For remote MongoDB connections:
+// - Make sure you have network access to the MongoDB server (check firewall settings)
+// - Verify the MongoDB server is configured to accept remote connections
+// - Ensure authentication credentials are correct if required
+//
+// If you encounter permission issues, run PowerShell as administrator
+//
+
+// IMPORTANT: Set your actual MongoDB connection string here
+const connectionString = "mongodb://localhost:27017/";  // Replace with your actual remote connection string
+// Examples:
+// - With authentication: "mongodb://username:password@server:port/"
+// - With replica set: "mongodb://server1:port,server2:port,server3:port/?replicaSet=myReplicaSet"
+// - With SSL: "mongodb://server:port/?ssl=true"
+
 const batchSize = 1000;     // Number of records per batch
 const pauseMs = 1000;       // Pause between batches (milliseconds)
 const dbName = "dxlrewardsdb";
@@ -21,8 +47,24 @@ print(`Processing ${batchSize} records per batch with ${pauseMs}ms pause`);
 
 try {
     // Connect to MongoDB using connection string
-    const conn = new Mongo(connectionString);
+    print(`Attempting to connect to MongoDB at: ${connectionString}`);
+    let conn;
+    try {
+        conn = new Mongo(connectionString);
+        print("Connection established successfully");
+    } catch (connError) {
+        print(`Connection error: ${connError.message}`);
+        print("Please check:");
+        print("- Your network connection");
+        print("- If the MongoDB server is running and accessible");
+        print("- If the connection string is correct");
+        print("- If authentication credentials are correct (if required)");
+        print("- If firewalls or security groups allow the connection");
+        throw connError;
+    }
+    
     const db = conn.getDB(dbName);
+    print(`Successfully connected to database: ${dbName}`);
     
     // Count total documents to track progress percentage
     const totalToDelete = db[collectionName].count({ [filterField]: { $exists: true } });
