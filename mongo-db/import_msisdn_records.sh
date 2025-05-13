@@ -1,23 +1,22 @@
 #!/bin/bash
 
-# Configuration for millions of records with Cosmos DB RU constraints
+# Configuration - Optimized for Cosmos DB with RU constraints (50M records)
 CSV_FILE="/Users/webster.muchefa/Downloads/INCENTIVE/SAMPLE_MSISDN.csv"
 CONNECTION_STRING="mongodb://localhost:27017"
 DATABASE="dxlrewardsdb"
 TEMP_COLLECTION="msisdn_records_temp"
 TARGET_COLLECTION="msisdn_records"
-BATCH_SIZE=200000      # Larger batch for initial import
-PROCESS_BATCH_SIZE=5000   # Smaller batches for Cosmos DB processing
-MAX_INSERTION_WORKERS=12  # More workers for parallel CSV import
-PAUSE_INTERVAL=10      # Frequent pauses for RU management
-PAUSE_DURATION=5000    # Longer pauses (5 seconds) to respect RU limits
-MEMORY_RESET=200       # Reset memory tracking every X batches
+BATCH_SIZE=200000      # Import batch size - higher values improve throughput
+PROCESS_BATCH_SIZE=5000   # Processing batch size - lower values better respect RU limits
+MAX_WORKERS=12         # Parallel workers - adjust based on CPU cores
+PAUSE_INTERVAL=10      # Batches between RU pauses
+PAUSE_DURATION=5       # Pause duration in seconds - increase for stricter RU limits
+MEMORY_RESET=200       # Memory cleanup interval - lower for limited RAM
 
-echo "Starting import process for large dataset (optimized for 50M records)..."
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting MSISDN import (50M records to Cosmos DB)"
 
-# Step 1: Modify import parameters to ensure strings remain strings
-echo "Step 1: Importing CSV data into temporary collection with string type preservation..."
-# Add --columnsHaveTypes and --type=csv to specify string type for MSISDN
+# Step 1: Import CSV to temporary collection with proper data typing
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Importing CSV to temporary collection..."
 mongoimport --uri "$CONNECTION_STRING" \
   --db "$DATABASE" \
   --collection "$TEMP_COLLECTION" \
@@ -25,154 +24,145 @@ mongoimport --uri "$CONNECTION_STRING" \
   --columnsHaveTypes \
   --fields "MSISDN.string()" \
   --file "$CSV_FILE" \
-  --numInsertionWorkers $MAX_INSERTION_WORKERS \
+  --numInsertionWorkers $MAX_WORKERS \
   --batchSize $BATCH_SIZE \
   --drop
 
-# Create index silently
-echo "Creating index on temporary collection..."
+# Create indexed temporary collection for efficient processing
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Creating index for faster processing..."
 mongo --quiet "$CONNECTION_STRING/$DATABASE" --eval "db.$TEMP_COLLECTION.createIndex({ \"MSISDN\": 1 }, { background: true })" > /dev/null 2>&1
 
-# Step 2: Transform and insert - optimized for RU constraints
-echo "Step 2: Processing records with RU-optimized strategy..."
+# Step 2: Process temp collection and insert to target with RU optimization
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Processing records with RU optimization..."
 mongo --quiet "$CONNECTION_STRING/$DATABASE" <<EOF
-print("[INFO] Starting data processing...");
-
-// Use statistics object for tracking
-var stats = {
-    processed: 0,
-    skipped: 0,
-    duplicates: 0,
-    batchCount: 0,
-    startTime: new Date()
-};
-
-// Get initial count
+var stats = { processed: 0, skipped: 0, duplicates: 0, batchCount: 0, startTime: new Date() };
 var initialCount = db.$TARGET_COLLECTION.count();
-print("[INFO] Target collection currently has " + initialCount + " documents");
+print("[$(date +"%Y-%m-%d %H:%M:%S")] Starting data transformation. Current target count: " + initialCount);
 
-// Use object instead of array for better memory handling with 50M records
-var msisdnSet = {};
+var msisdnSet = {};  // For duplicate detection
 var now = new Date();
+var batch = [];
 
 try {
-    // Process in optimized batches
+    // Use cursor with noCursorTimeout to prevent timeout on large collections
     var cursor = db.$TEMP_COLLECTION.find().noCursorTimeout().batchSize($PROCESS_BATCH_SIZE);
-    var batch = [];
-
-    // Add a reminder about import options
-    print("[INFO] Using direct string import with --columnsHaveTypes and MSISDN.string() type specification");
-
+    
     while(cursor.hasNext()) {
         var doc = cursor.next();
         var msisdn = doc.MSISDN ? doc.MSISDN.toString().trim() : null;
-
-        // Log information about the MSISDN type in the first few records
-        if (stats.batchCount === 0 && stats.processed < 10) {
-            print("[DEBUG] MSISDN #" + stats.processed + " Value: " + msisdn + " Type: " + typeof doc.MSISDN);
+        
+        // Only log the first few records to verify data format
+        if (stats.batchCount === 0 && stats.processed < 3) {
+            print("[DEBUG] Sample MSISDN: " + msisdn + " (Type: " + typeof doc.MSISDN + ")");
         }
-
-        // Skip invalid/duplicate records
-        if (!msisdn || msisdn === "") { stats.skipped++; continue; }
-        if (msisdnSet[msisdn]) { stats.duplicates++; continue; }
-
-        // Mark as processed and add to batch
+        
+        // Data validation - skip invalid records
+        if (!msisdn || msisdn === "") { 
+            stats.skipped++; 
+            continue; 
+        }
+        
+        // Deduplication - skip duplicates within current import
+        if (msisdnSet[msisdn]) { 
+            stats.duplicates++; 
+            continue; 
+        }
+        
+        // Track seen MSISDNs and prepare document for insertion
         msisdnSet[msisdn] = 1;
-
-        // Create the document to insert - match Go struct mapping
-        var newDoc = {
-            _id: msisdn,  // Store MSISDN directly as _id to match Go struct
-            simType: "N/A",
-            simNumber: "N/A",
-            status: "completed",
-            requestId: "batch-import-old-app",
-            allocationDate: now,
-            createdDate: now
-        };
-
-        // Add to batch
         batch.push({
             insertOne: {
-                document: newDoc
+                document: {
+                    _id: msisdn,  // Use MSISDN as document ID
+                    simType: "N/A",
+                    simNumber: "N/A",
+                    status: "completed",
+                    requestId: "batch-import-old-app",
+                    allocationDate: now,
+                    createdDate: now
+                }
             }
         });
-
-        // Process batch when full
+        
+        // Process batch when full - respects RU limits
         if (batch.length >= $PROCESS_BATCH_SIZE) {
             try {
+                // Use unordered bulk writes for better performance
                 db.$TARGET_COLLECTION.bulkWrite(batch, { ordered: false });
                 stats.processed += batch.length;
                 stats.batchCount++;
-
-                // Status reporting
+                
+                // Status reporting at regular intervals
                 if (stats.batchCount % 50 === 0) {
-                    var elapsedSecs = (new Date() - stats.startTime)/1000;
-                    var recordsPerSec = Math.round(stats.processed/elapsedSecs);
-                    print("[INFO] Processed: " + stats.processed.toLocaleString() +
-                          " | Skipped: " + (stats.duplicates + stats.skipped).toLocaleString() +
-                          " | Speed: " + recordsPerSec.toLocaleString() + " rec/sec");
+                    var elapsed = (new Date() - stats.startTime)/1000;
+                    var speed = Math.round(stats.processed/elapsed);
+                    var percent = initialCount > 0 ? Math.round((stats.processed / initialCount) * 100) : 0;
+                    
+                    print("[PROGRESS] " + 
+                          stats.processed.toLocaleString() + " processed | " + 
+                          (stats.duplicates + stats.skipped).toLocaleString() + " skipped | " + 
+                          speed.toLocaleString() + " rec/sec | " +
+                          "~" + percent + "% complete");
                 }
-
-                // Memory management for large datasets
+                
+                // Memory management - critical for 50M+ records
                 if (stats.batchCount % $MEMORY_RESET === 0) {
+                    print("[MEMORY] Freeing memory after " + ($PROCESS_BATCH_SIZE * $MEMORY_RESET) + " records");
                     msisdnSet = {};
                     try { gc(); } catch(e) {}
                 }
-
-                // RU management pauses
+                
+                // RU management - pause to avoid throttling
                 if (stats.batchCount % $PAUSE_INTERVAL === 0) {
-                    print("[INFO] Pausing for RU management...");
-                    sleep($PAUSE_DURATION);
+                    print("[RU MGMT] Pausing for " + $PAUSE_DURATION + "s to respect RU limits");
+                    sleep($PAUSE_DURATION * 1000);
                 }
-
+                
                 batch = [];
             } catch (e) {
-                print("[ERROR] Batch processing failed: " + e);
-                sleep(10000); // Long pause after error
+                print("[ERROR] Batch failed: " + e + " - Retrying after pause");
+                sleep(10000);
                 batch = [];
             }
         }
     }
-
+    
     // Process final batch
     if (batch.length > 0) {
         try {
             db.$TARGET_COLLECTION.bulkWrite(batch, { ordered: false });
             stats.processed += batch.length;
+            print("[INFO] Final batch of " + batch.length + " records processed");
         } catch (e) {
             print("[ERROR] Final batch failed: " + e);
         }
     }
-
-    // Final stats
+    
+    // Final statistics
     var finalCount = db.$TARGET_COLLECTION.count();
-    var netNewRecords = finalCount - initialCount;
-    var totalTimeSecs = (new Date() - stats.startTime)/1000;
-    var throughput = Math.round(stats.processed/totalTimeSecs);
-
-    print("\n[SUCCESS] Import completed - Final statistics");
-    print("┌───────────────────────────────────────────────┐");
-    print("│ Total records processed:  " + stats.processed.toLocaleString().padStart(12) + "        │");
-    print("│ Duplicates skipped:       " + stats.duplicates.toLocaleString().padStart(12) + "        │");
-    print("│ Invalid records skipped:  " + stats.skipped.toLocaleString().padStart(12) + "        │");
-    print("│ Initial collection count: " + initialCount.toLocaleString().padStart(12) + "        │");
-    print("│ Final collection count:   " + finalCount.toLocaleString().padStart(12) + "        │");
-    print("│ Net new documents added:  " + netNewRecords.toLocaleString().padStart(12) + "        │");
-    print("│ Total execution time:     " + totalTimeSecs.toLocaleString().padStart(12) + " seconds │");
-    print("│ Average throughput:       " + throughput.toLocaleString().padStart(12) + " rec/sec │");
-    print("└───────────────────────────────────────────────┘");
+    var totalTime = (new Date() - stats.startTime)/1000;
+    var newRecords = finalCount - initialCount;
+    
+    print("\n[SUCCESS] Import completed at $(date +"%Y-%m-%d %H:%M:%S")");
+    print("┌────────────────────────────────────────┐");
+    print("│ Records processed: " + stats.processed.toLocaleString().padStart(10) + "               │");
+    print("│ Duplicates skipped: " + stats.duplicates.toLocaleString().padStart(10) + "               │");
+    print("│ Invalid records: " + stats.skipped.toLocaleString().padStart(10) + "               │");
+    print("│ Net new records: " + newRecords.toLocaleString().padStart(10) + "               │");
+    print("│ Processing time: " + totalTime.toLocaleString().padStart(10) + " sec            │");
+    print("│ Import speed: " + Math.round(stats.processed/totalTime).toLocaleString().padStart(10) + " rec/sec        │");
+    print("└────────────────────────────────────────┘");
 } catch (e) {
-    print("[ERROR] Import process failed: " + e);
+    print("[CRITICAL] Process failed with error: " + e);
 } finally {
+    // Ensure cursor is closed and temp collection cleaned up
     if (cursor) cursor.close();
-
+    
     if (stats.processed > 0) {
-        print("[INFO] Cleaning up temporary collection...");
+        print("[CLEANUP] Removing temporary collection");
         db.$TEMP_COLLECTION.drop();
     }
-
-    msisdnSet = null;
 }
 EOF
 
-echo "Import process completed."
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Import process completed"
