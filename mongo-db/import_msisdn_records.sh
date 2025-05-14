@@ -6,15 +6,15 @@ CONNECTION_STRING="mongodb://localhost:27017"
 DATABASE="dxlrewardsdb"
 TEMP_COLLECTION="msisdn_records_temp"
 TARGET_COLLECTION="msisdn_records"
-BATCH_SIZE=100000           # Increased batch size for faster imports
-PROCESS_BATCH_SIZE=10000    # Smaller batches to avoid memory pressure
-MAX_WORKERS=16              # Increased worker threads
-PAUSE_INTERVAL=5            # More frequent pauses
-PAUSE_DURATION=1            # Shorter pauses
-MEMORY_RESET=20             # More frequent memory cleanup
+BATCH_SIZE=100000
+PROCESS_BATCH_SIZE=10000
+MAX_WORKERS=16
+PAUSE_INTERVAL=5
+PAUSE_DURATION=1
+MEMORY_RESET=20
 PROGRESS_INTERVAL=10
 LOG_THRESHOLD=1000
-MONGODB_FLAGS="--quiet --norc"  # MongoDB shell flags
+MONGODB_FLAGS="--quiet --norc"
 
 # Cleanup function to handle Ctrl+C gracefully
 cleanup() {
@@ -58,13 +58,11 @@ SETUP_JS_FILE=$(mktemp)
 cat > "$SETUP_JS_FILE" << 'EOF'
 const target = process.env.TARGET_COLLECTION;
 
-// Create target collection if it doesn't exist
 if (!db.getCollectionNames().includes(target)) {
     db.createCollection(target);
     print("Created target collection");
 }
 
-// Check if index exists
 const indexes = db[target].getIndexes();
 const hasIdIndex = indexes.some(idx => {
     return idx.key && idx.key._id === 1;
@@ -86,7 +84,6 @@ echo "┌───────────────────────�
 echo "│ PHASE 2: Importing CSV to temporary collection              │"
 echo "└─────────────────────────────────────────────────────────────┘"
 
-# Stream directly to mongo with optimized parameters
 mongoimport --uri="$CONNECTION_STRING/$DATABASE" \
   --collection="$TEMP_COLLECTION" \
   --type=csv \
@@ -97,7 +94,6 @@ mongoimport --uri="$CONNECTION_STRING/$DATABASE" \
   --batchSize="$BATCH_SIZE" \
   --drop
 
-# Verify the import was successful
 if [ $? -ne 0 ]; then
   echo "❌ CSV import failed. Check the CSV file and MongoDB connection."
   exit 1
@@ -141,7 +137,6 @@ const currentDateTime = process.env.CURRENT_DATETIME;
 const progressInterval = parseInt(process.env.PROGRESS_INTERVAL, 10);
 const logThreshold = parseInt(process.env.LOG_THRESHOLD, 10);
 
-// Fast estimated count
 const totalRecords = db[tempCollection].estimatedDocumentCount();
 const initialCount = db[targetCollection].estimatedDocumentCount();
 
@@ -258,10 +253,7 @@ try {
         }
 
         cursor.close();
-
-        // If we processed fewer records than our limit, we're done
         moreRecords = (recordsInChunk >= processBatchSize * 10);
-
         cursor.close();
     }
 
