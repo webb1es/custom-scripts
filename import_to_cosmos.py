@@ -7,11 +7,12 @@ from pymongo.errors import BulkWriteError, ConnectionFailure
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CONNECTION_STRING = "YOUR_COSMOS_DB_CONNECTION_STRING"
-DATABASE_NAME = "your_database"
-COLLECTION_NAME = "your_collection"
-CSV_FILE = "mongo-db/SAMPLE_MSISDN.csv"
-BATCH_SIZE = 1000
+CONNECTION_STRING = "CONNECTION_STRING"
+DATABASE_NAME = "dxlrewardsdb"
+COLLECTION_NAME = "msisdn_records"
+CSV_FILE = "SAMPLE_MSISDN_slim.csv"
+BATCH_SIZE = 10000
+LOG_FREQUENCY = 10
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 
@@ -20,11 +21,13 @@ def process_csv_to_cosmos():
     total_processed = 0
     total_duplicates = 0
     start_time = time.time()
+    batch_count = 0
     
     try:
         client = MongoClient(CONNECTION_STRING)
         db = client[DATABASE_NAME]
         collection = db[COLLECTION_NAME]
+        
         db.command('ping')
         logging.info("Connected to Cosmos DB successfully")
         
@@ -39,7 +42,7 @@ def process_csv_to_cosmos():
                     continue
                     
                 msisdn = line[0].strip('"')
-                current_time = datetime.datetime.utcnow()  # Native datetime object, MongoDB driver converts to BSON Date
+                current_time = datetime.datetime.utcnow()
                 
                 doc = {
                     "_id": msisdn,
@@ -58,7 +61,12 @@ def process_csv_to_cosmos():
                     total_duplicates += duplicates
                     if success:
                         total_processed += len(batch) - duplicates
-                        logging.info(f"Progress: {total_processed} records processed, {total_duplicates} duplicates skipped")
+                        batch_count += 1
+                        
+                        if batch_count % LOG_FREQUENCY == 0:
+                            elapsed = time.time() - start_time
+                            rate = total_processed / elapsed if elapsed > 0 else 0
+                            logging.info(f"Progress: {total_processed:,} records processed, {total_duplicates:,} duplicates skipped ({rate:.2f} records/s)")
                     batch = []
                     
             if batch:
@@ -69,7 +77,7 @@ def process_csv_to_cosmos():
         
         elapsed_time = time.time() - start_time
         records_per_second = total_processed / elapsed_time if elapsed_time > 0 else 0
-        logging.info(f"Import completed. {total_processed} records inserted, {total_duplicates} duplicates skipped in {elapsed_time:.2f}s ({records_per_second:.2f} records/s)")
+        logging.info(f"Import completed. {total_processed:,} records inserted, {total_duplicates:,} duplicates skipped in {elapsed_time:.2f}s ({records_per_second:.2f} records/s)")
         
     except ConnectionFailure as e:
         logging.error(f"Failed to connect to Cosmos DB: {e}")
@@ -90,7 +98,6 @@ def write_batch_with_retry(collection, batch, max_retries):
         except BulkWriteError as bwe:
             write_errors = bwe.details.get('writeErrors', [])
             
-            # Count duplicate key errors (code 11000)
             new_duplicates = sum(1 for err in write_errors if err.get('code') == 11000)
             duplicate_count += new_duplicates
             other_errors = len(write_errors) - new_duplicates
@@ -98,9 +105,9 @@ def write_batch_with_retry(collection, batch, max_retries):
             if other_errors > 0:
                 logging.warning(f"Bulk write: {new_duplicates} duplicates, {other_errors} other errors on attempt {attempt+1}/{max_retries}")
             else:
-                logging.info(f"Bulk write: {new_duplicates} duplicates ignored")
+                if attempt == 0 and new_duplicates > 100:
+                    logging.info(f"Bulk write: {new_duplicates} duplicates ignored")
                 
-            # If only duplicate errors occurred, consider this a success
             if other_errors == 0:
                 return True, duplicate_count
                 
@@ -113,7 +120,7 @@ def write_batch_with_retry(collection, batch, max_retries):
             logging.error(f"Error on attempt {attempt+1}/{max_retries}: {e}")
             if attempt == max_retries - 1:
                 return False, duplicate_count
-            time.sleep(RETRY_DELAY * (attempt + 1))  # Exponential backoff
+            time.sleep(RETRY_DELAY * (attempt + 1))
             
     return False, duplicate_count
 
