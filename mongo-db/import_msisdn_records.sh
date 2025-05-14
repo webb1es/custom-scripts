@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # Configuration
-CSV_FILE="/Users/webster.muchefa/Downloads/INCENTIVE/SAMPLE_MSISDN.csv"
+CSV_FILE="/Users/webster.muchefa/Downloads/INCENTIVE/MSISDN.csv"
 CONNECTION_STRING="mongodb://localhost:27017"
 DATABASE="dxlrewardsdb"
 TEMP_COLLECTION="msisdn_records_temp"
 TARGET_COLLECTION="msisdn_records"
-BATCH_SIZE=500000           # Increased batch size for faster imports
-PROCESS_BATCH_SIZE=50000    # Smaller batches to avoid memory pressure
+BATCH_SIZE=100000           # Increased batch size for faster imports
+PROCESS_BATCH_SIZE=10000    # Smaller batches to avoid memory pressure
 MAX_WORKERS=16              # Increased worker threads
 PAUSE_INTERVAL=5            # More frequent pauses
 PAUSE_DURATION=1            # Shorter pauses
@@ -73,9 +73,8 @@ const hasIdIndex = indexes.some(idx => {
 if (!hasIdIndex) {
     print("Creating _id index on target collection...");
     db[target].createIndex({ "_id": 1 });
-    print("Index created");
 } else {
-    print("_id index already exists on target collection");
+    print("_id index exists on target collection");
 }
 EOF
 
@@ -88,23 +87,46 @@ echo "│ PHASE 2: Importing CSV to temporary collection              │"
 echo "└─────────────────────────────────────────────────────────────┘"
 
 # Stream directly to mongo with optimized parameters
-mongoimport --uri "$CONNECTION_STRING" \
-  --db "$DATABASE" \
-  --collection "$TEMP_COLLECTION" \
-  --type csv \
+mongoimport --uri="$CONNECTION_STRING/$DATABASE" \
+  --collection="$TEMP_COLLECTION" \
+  --type=csv \
   --columnsHaveTypes \
-  --fields "MSISDN.string()" \
-  --file "$CSV_FILE" \
-  --numInsertionWorkers $MAX_WORKERS \
-  --batchSize $BATCH_SIZE \
-  --maintainInsertionOrder false \
-  --stopOnError false \
+  --fields="MSISDN.string()" \
+  --file="$CSV_FILE" \
+  --numInsertionWorkers="$MAX_WORKERS" \
+  --batchSize="$BATCH_SIZE" \
   --drop
+
+# Verify the import was successful
+if [ $? -ne 0 ]; then
+  echo "❌ CSV import failed. Check the CSV file and MongoDB connection."
+  exit 1
+fi
+
+# Check if temporary collection exists before proceeding
+COLLECTION_CHECK=$(mongosh $MONGODB_FLAGS "$CONNECTION_STRING/$DATABASE" --eval "db.getCollectionNames().includes('$TEMP_COLLECTION')" --quiet)
+if [[ "$COLLECTION_CHECK" != "true" ]]; then
+  echo "❌ Temporary collection was not created. Cannot proceed."
+  exit 1
+fi
 
 # PHASE 3: Process and import records in a optimized way
 echo "┌─────────────────────────────────────────────────────────────┐"
 echo "│ PHASE 3: Processing and importing to main collection        │"
 echo "└─────────────────────────────────────────────────────────────┘"
+
+# Check temporary collection count before processing
+TEMP_COUNT=$(mongosh $MONGODB_FLAGS "$CONNECTION_STRING/$DATABASE" --eval "db.$TEMP_COLLECTION.countDocuments()" --quiet)
+if [[ "$TEMP_COUNT" -eq 0 ]]; then
+  echo "⚠️ Warning: Temporary collection appears to be empty. Check the CSV file."
+  echo -e "Do you want to continue anyway? (y/n) \c"
+  read -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Exiting without processing."
+    exit 1
+  fi
+fi
 
 TEMP_JS_FILE=$(mktemp)
 
@@ -137,20 +159,17 @@ function getProgressBar(percent, length = 30) {
 
 var now = new Date();
 var batch = [];
-var sampleMSISDNs = [];
 var reportedBatches = 0;
 var lastObjectId = null;
+var totalBatches = Math.ceil(totalRecords / processBatchSize);
 
 try {
-    // Create a temp index if it doesn't exist to enable efficient pagination
     const tempIndexes = db[tempCollection].getIndexes();
     if (!tempIndexes.some(idx => idx.key && idx.key._id === 1)) {
-        print("Creating temporary _id index for efficient cursor pagination...");
+        print("Creating temporary _id index for pagination...");
         db[tempCollection].createIndex({ "_id": 1 }, { background: true });
-        print("Temporary index created");
     }
 
-    // Process the collection in chunks to avoid cursor timeouts and memory issues
     var moreRecords = true;
     var query = {};
 
@@ -178,11 +197,6 @@ try {
                 continue;
             }
 
-            if (sampleMSISDNs.length < 3) {
-                sampleMSISDNs.push(msisdn);
-            }
-
-            // Use updateOne with upsert instead of insertOne to handle duplicates at DB level
             batch.push({
                 updateOne: {
                     filter: { _id: msisdn },
@@ -202,26 +216,21 @@ try {
 
             if (batch.length >= processBatchSize) {
                 try {
-                    const result = db[targetCollection].bulkWrite(batch, {
+                    db[targetCollection].bulkWrite(batch, {
                         ordered: false,
-                        writeConcern: { w: 0 }  // Fire and forget for speed
+                        writeConcern: { w: 0 }
                     });
 
                     stats.processed += batch.length;
                     stats.batchCount++;
-
-                    if (stats.batchCount === 1 && sampleMSISDNs.length > 0) {
-                        print(`\n📱 Sample MSISDNs: ${sampleMSISDNs.join(", ")}\n`);
-                    }
 
                     if (stats.batchCount % progressInterval === 0) {
                         var elapsed = (new Date() - stats.startTime)/1000;
                         var speed = Math.round(stats.processed/elapsed);
                         var percent = Math.min(100, Math.round((stats.processed / totalRecords) * 100));
 
-                        print(`\n📊 Batch #${stats.batchCount} Complete ${getProgressBar(percent)}`);
-                        print(`   ✓ Processed: ${stats.processed.toLocaleString()} of ${totalRecords.toLocaleString()} (${speed.toLocaleString()} rec/sec)`);
-                        print(`   ✓ Skipped: ${stats.skipped.toLocaleString()} records`);
+                        print(`\n📊 Batch ${stats.batchCount}/${totalBatches} ${getProgressBar(percent)}`);
+                        print(`   ✓ ${stats.processed.toLocaleString()}/${totalRecords.toLocaleString()} records (${speed.toLocaleString()} rec/sec)`);
 
                         const remaining = Math.round((totalRecords - stats.processed) / speed);
                         if (remaining > 0) {
@@ -232,16 +241,10 @@ try {
                     }
 
                     if (stats.batchCount % memoryReset === 0) {
-                        if (stats.batchCount % progressInterval !== 0) {
-                            print(`\n🧹 Memory cleanup after ${processBatchSize * memoryReset} records`);
-                        }
                         try { gc(); } catch(e) {}
                     }
 
                     if (stats.batchCount % pauseInterval === 0) {
-                        if (stats.batchCount % progressInterval !== 0 && stats.batchCount !== reportedBatches) {
-                            print(`\n⏸ Pause (${pauseDuration}s)`);
-                        }
                         sleep(pauseDuration * 1000);
                     }
 
@@ -259,25 +262,16 @@ try {
         // If we processed fewer records than our limit, we're done
         moreRecords = (recordsInChunk >= processBatchSize * 10);
 
-        if (moreRecords) {
-            print(`\n⏳ Processed ${recordsInChunk} records in this chunk, continuing to next chunk...`);
-            try { gc(); } catch(e) {}
-            sleep(pauseDuration * 1000);
-        }
+        cursor.close();
     }
 
-    // Process final batch
     if (batch.length > 0) {
         try {
             db[targetCollection].bulkWrite(batch, {
                 ordered: false,
-                writeConcern: { w: 1 }  // Ensure the final batch is written
+                writeConcern: { w: 1 }
             });
             stats.processed += batch.length;
-
-            if (batch.length >= logThreshold) {
-                print(`\n📤 Final batch of ${batch.length} records processed`);
-            }
         } catch (e) {
             print(`\n❌ Final batch failed: ${e}`);
         }
